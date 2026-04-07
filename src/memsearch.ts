@@ -76,7 +76,11 @@ export async function queryMemsearch(prompt: string): Promise<string | null> {
   const text = output.trim();
   if (proc.exitCode !== 0 || !text) return null;
 
-  return `[memsearch] Relevant memories:\n${text}`;
+  const MAX_MEMSEARCH_CHARS = 3000;
+  const truncated = text.length > MAX_MEMSEARCH_CHARS
+    ? text.slice(0, MAX_MEMSEARCH_CHARS) + "\n...[truncated]"
+    : text;
+  return `[memsearch] Relevant memories:\n${truncated}`;
 }
 
 const STOP_HOOK_TIMEOUT_MS = 120_000;

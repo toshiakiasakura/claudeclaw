@@ -406,44 +406,41 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
     `[${new Date().toLocaleTimeString()}] Running: ${name} (${isNew ? "new session" : `resume ${existing.sessionId.slice(0, 8)}`}, security: ${security.level})`
   );
 
+  // Discord: fetch memsearch context before building args so it goes into the user
+  // prompt (not the system prompt). Keeping --append-system-prompt stable lets
+  // Anthropic's prompt cache hit on subsequent sessions, avoiding cache-creation
+  // cost on every /reset.
+  let effectivePrompt = prompt;
+  if (name === "discord") {
+    const memories = await queryMemsearch(prompt);
+    if (memories) effectivePrompt = `${memories}\n\n${prompt}`;
+  }
+
   // New session: use json output to capture Claude's session_id
   // Resumed session: use text output with --resume
   const outputFormat = isNew ? "json" : "text";
-  const args = ["claude", "-p", prompt, "--output-format", outputFormat, ...securityArgs];
+  const args = ["claude", "-p", effectivePrompt, "--output-format", outputFormat, ...securityArgs];
 
   if (!isNew) {
     args.push("--resume", existing.sessionId);
   }
 
-  // Build the appended system prompt: prompt files + directory scoping
-  // This is passed on EVERY invocation (not just new sessions) because
-  // --append-system-prompt does not persist across --resume.
-  const promptContent = await loadPrompts();
-  const appendParts: string[] = [
-    "You are running inside ClaudeClaw.",
-  ];
-  if (promptContent) appendParts.push(promptContent);
-
-  // Load the project's CLAUDE.md if it exists
-  if (existsSync(PROJECT_CLAUDE_MD)) {
-    try {
-      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
-      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
-    } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
-    }
-  }
-
-  // Discord messages: proactively inject memsearch context before spawning claude -p
-  if (name === "discord") {
-    const memories = await queryMemsearch(prompt);
-    if (memories) appendParts.push(memories);
-  }
+  // Minimal appended system prompt — Claude Code already auto-loads CLAUDE.md and
+  // the prompts (SOUL/IDENTITY/USER) are duplicated there, so we skip loadPrompts()
+  // and the explicit PROJECT_CLAUDE_MD read to keep the system prompt stable across
+  // sessions (enabling Anthropic prompt-cache hits instead of creation on every reset).
+  const appendParts: string[] = ["You are running inside ClaudeClaw."];
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
   if (appendParts.length > 0) {
     args.push("--append-system-prompt", appendParts.join("\n\n"));
   }
+
+  // Prevent plugin MCP tool schemas from being loaded in child Claude sessions.
+  // Without this, the 9 enabled plugins in .claude/settings.json inject their MCP tool
+  // schemas into the system prompt, adding thousands of tokens and causing cache misses
+  // whenever MCP servers connect inconsistently between sessions.
+  args.push("--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config");
 
   // Strip CLAUDECODE env var so child claude processes don't think they're nested
   const { CLAUDECODE: _, ...cleanEnv } = process.env;
