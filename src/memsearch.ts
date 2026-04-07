@@ -1,4 +1,8 @@
 import { createHash } from "crypto";
+import { readdir } from "fs/promises";
+import { existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 
 const SEARCH_TIMEOUT_MS = 5_000;
 const SEARCH_TOP_K = 5;
@@ -73,4 +77,58 @@ export async function queryMemsearch(prompt: string): Promise<string | null> {
   if (proc.exitCode !== 0 || !text) return null;
 
   return `[memsearch] Relevant memories:\n${text}`;
+}
+
+const STOP_HOOK_TIMEOUT_MS = 120_000;
+
+async function findMemsearchStopHook(): Promise<string | null> {
+  const pluginDir = join(homedir(), ".claude/plugins/cache/memsearch-plugins/memsearch");
+  try {
+    const versions = await readdir(pluginDir);
+    for (const v of versions.sort().reverse()) {
+      const hookPath = join(pluginDir, v, "hooks", "stop.sh");
+      if (existsSync(hookPath)) return hookPath;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Invoke the memsearch stop hook for a completed session so it can extract,
+ * summarize, and index the conversation into memsearch memory.
+ * Designed to be called fire-and-forget after a Discord response is sent.
+ */
+export async function invokeMemsearchStopHook(sessionId: string): Promise<void> {
+  const hookPath = await findMemsearchStopHook();
+  if (!hookPath) return;
+
+  const transcriptPath = join(
+    homedir(),
+    ".claude/projects",
+    process.cwd().replace(/[/.]/g, "-"),
+    `${sessionId}.jsonl`
+  );
+
+  if (!existsSync(transcriptPath)) return;
+
+  const input = JSON.stringify({ transcript_path: transcriptPath, stop_hook_active: false });
+
+  const { CLAUDECODE: _, ...cleanEnv } = process.env;
+  const proc = Bun.spawn(["bash", hookPath], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: cleanEnv as Record<string, string>,
+  });
+
+  proc.stdin.write(input);
+  proc.stdin.end();
+
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), STOP_HOOK_TIMEOUT_MS));
+  const done = await Promise.race([proc.exited, timeout]);
+
+  if (done === null) {
+    try { proc.kill(); } catch {}
+    console.warn("[memsearch] stop hook timed out");
+  }
 }

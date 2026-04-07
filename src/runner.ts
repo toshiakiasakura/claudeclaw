@@ -11,7 +11,7 @@ import {
 import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
-import { queryMemsearch } from "./memsearch";
+import { queryMemsearch, invokeMemsearchStopHook } from "./memsearch";
 
 const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
 // Resolve prompts relative to the claudeclaw installation, not the project dir
@@ -543,6 +543,13 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
       }
       emitCompactEvent({ type: "warn", turnCount });
     }
+  }
+
+  // Discord: trigger memsearch stop hook to save this conversation to memory
+  if (name === "discord" && exitCode === 0 && sessionId !== "unknown") {
+    invokeMemsearchStopHook(sessionId).catch((err) =>
+      console.error("[memsearch] stop hook failed:", err)
+    );
   }
 
   return result;
