@@ -697,6 +697,46 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   }
 }
 
+// --- Context window helper ---
+
+async function readContextLines(sessionId: string): Promise<string[] | null> {
+  const home = homedir();
+  const projectSlug = process.cwd().replace(/[^a-zA-Z0-9]/g, "-");
+  const jsonlPath = `${home}/.claude/projects/${projectSlug}/${sessionId}.jsonl`;
+  if (!existsSync(jsonlPath)) return null;
+  try {
+    const raw = await readFile(jsonlPath, "utf8");
+    let lastUsage: any = null;
+    let totalOutput = 0;
+    for (const line of raw.trim().split("\n")) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.message?.usage) lastUsage = obj.message.usage;
+        if (obj.message?.usage?.output_tokens) totalOutput += obj.message.usage.output_tokens;
+      } catch {}
+    }
+    if (!lastUsage) return null;
+    const input = lastUsage.input_tokens ?? 0;
+    const cacheCreation = lastUsage.cache_creation_input_tokens ?? 0;
+    const cacheRead = lastUsage.cache_read_input_tokens ?? 0;
+    const totalContext = input + cacheCreation + cacheRead;
+    const maxContext = 200000;
+    const pct = ((totalContext / maxContext) * 100).toFixed(1);
+    const filled = Math.round((Math.min(totalContext / maxContext, 1)) * 20);
+    const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+    return [
+      `📐 **Context Window** ${bar} ${pct}%`,
+      `Total: \`${totalContext.toLocaleString()}\` / \`${maxContext.toLocaleString()}\` tokens`,
+      `├ Input: \`${input.toLocaleString()}\``,
+      `├ Cache creation: \`${cacheCreation.toLocaleString()}\``,
+      `├ Cache read: \`${cacheRead.toLocaleString()}\``,
+      `└ Output (cumulative): \`${totalOutput.toLocaleString()}\``,
+    ];
+  } catch {
+    return null;
+  }
+}
+
 // --- Interaction handler (slash commands + secretary buttons) ---
 
 async function handleInteractionCreate(token: string, interaction: DiscordInteraction): Promise<void> {
@@ -766,6 +806,9 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
           lines.push(`  ... and ${threadSessions.length - 5} more`);
         }
       }
+      // Append context window usage inline
+      const contextLines = await readContextLines(session.sessionId);
+      if (contextLines) lines.push("", ...contextLines);
       await respondToInteraction(interaction, { content: lines.join("\n") });
       return;
     }
@@ -777,7 +820,7 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
         return;
       }
       const home = homedir();
-      const projectSlug = process.cwd().replace(/\//g, "-");
+      const projectSlug = process.cwd().replace(/[^a-zA-Z0-9]/g, "-");
       const jsonlPath = `${home}/.claude/projects/${projectSlug}/${session.sessionId}.jsonl`;
       if (!existsSync(jsonlPath)) {
         await respondToInteraction(interaction, { content: "Conversation file not found." });
