@@ -1,4 +1,4 @@
-import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession } from "../runner";
+import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession, killActiveProcess } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession, peekSession } from "../sessions";
 import { listThreadSessions, removeThreadSession, peekThreadSession } from "../sessionManager";
@@ -399,6 +399,11 @@ async function registerSlashCommands(token: string): Promise<void> {
     {
       name: "context",
       description: "Show context window usage",
+      type: 1,
+    },
+    {
+      name: "stop",
+      description: "Interrupt the currently running Claude session",
       type: 1,
     },
   ];
@@ -819,6 +824,19 @@ async function handleInteractionCreate(token: string, interaction: DiscordIntera
         await respondToInteraction(interaction, {
           content: `Failed to read context: ${err instanceof Error ? err.message : err}`,
         });
+      }
+      return;
+    }
+
+    if (interaction.data.name === "stop") {
+      const channelId = interaction.channel_id;
+      const threadId = channelId && knownThreads.has(channelId) ? channelId : undefined;
+      const killed = killActiveProcess(threadId);
+      if (killed) {
+        const scope = threadId ? `thread \`${threadId.slice(0, 8)}\`` : "global session";
+        await respondToInteraction(interaction, { content: `⏹️ Stop signal sent to ${scope}.` });
+      } else {
+        await respondToInteraction(interaction, { content: "Nothing is running right now." });
       }
       return;
     }

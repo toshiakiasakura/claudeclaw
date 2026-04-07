@@ -66,6 +66,22 @@ let globalQueue: Promise<unknown> = Promise.resolve();
 // Per-thread queues — each thread runs independently in parallel
 const threadQueues = new Map<string, Promise<unknown>>();
 
+// Track active Claude subprocesses so they can be interrupted
+const activeProcs = new Map<string, ReturnType<typeof Bun.spawn>>();
+
+/**
+ * Kill the Claude process currently running for the given thread (or global session).
+ * Returns true if a process was found and signalled, false if nothing was running.
+ */
+export function killActiveProcess(threadId?: string): boolean {
+  const key = threadId ?? "global";
+  const proc = activeProcs.get(key);
+  if (!proc) return false;
+  try { proc.kill("SIGTERM"); } catch {}
+  setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 3000);
+  return true;
+}
+
 function enqueue<T>(fn: () => Promise<T>, threadId?: string): Promise<T> {
   if (threadId) {
     const current = threadQueues.get(threadId) ?? Promise.resolve();
@@ -125,7 +141,8 @@ async function runClaudeOnce(
   model: string,
   api: string,
   baseEnv: Record<string, string>,
-  timeoutMs: number = CLAUDE_TIMEOUT_MS
+  timeoutMs: number = CLAUDE_TIMEOUT_MS,
+  procKey?: string
 ): Promise<{ rawStdout: string; stderr: string; exitCode: number }> {
   const args = [...baseArgs];
   const normalizedModel = model.trim().toLowerCase();
@@ -136,6 +153,8 @@ async function runClaudeOnce(
     stderr: "pipe",
     env: buildChildEnv(baseEnv, model, api),
   });
+
+  if (procKey) activeProcs.set(procKey, proc);
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)), timeoutMs);
@@ -169,6 +188,8 @@ async function runClaudeOnce(
       stderr: message,
       exitCode: 124,
     };
+  } finally {
+    if (procKey) activeProcs.delete(procKey);
   }
 }
 
@@ -428,7 +449,8 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   const { CLAUDECODE: _, ...cleanEnv } = process.env;
   const baseEnv = { ...cleanEnv } as Record<string, string>;
 
-  let exec = await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs);
+  const procKey = threadId ?? "global";
+  let exec = await runClaudeOnce(args, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs, procKey);
   const primaryRateLimit = extractRateLimitMessage(exec.rawStdout, exec.stderr);
   let usedFallback = false;
 
@@ -436,7 +458,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
     console.warn(
       `[${new Date().toLocaleTimeString()}] Claude limit reached; retrying with fallback${fallbackConfig.model ? ` (${fallbackConfig.model})` : ""}...`
     );
-    exec = await runClaudeOnce(args, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs);
+    exec = await runClaudeOnce(args, fallbackConfig.model, fallbackConfig.api, baseEnv, timeoutMs, procKey);
     usedFallback = true;
   }
 
