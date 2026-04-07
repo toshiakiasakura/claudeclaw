@@ -340,9 +340,19 @@ function isVoiceAttachment(a: DiscordAttachment): boolean {
   return Boolean(a.content_type?.startsWith("audio/"));
 }
 
+function isDocumentAttachment(a: DiscordAttachment): boolean {
+  const docTypes = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ];
+  if (a.content_type && docTypes.includes(a.content_type)) return true;
+  const ext = extname(a.filename).toLowerCase();
+  return ext === ".pdf" || ext === ".docx";
+}
+
 async function downloadDiscordAttachment(
   attachment: DiscordAttachment,
-  type: "image" | "voice",
+  type: "image" | "voice" | "document",
 ): Promise<string | null> {
   const dir = join(process.cwd(), ".claude", "claudeclaw", "inbox", "discord");
   await mkdir(dir, { recursive: true });
@@ -475,10 +485,12 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   // Detect attachments
   const imageAttachments = message.attachments.filter(isImageAttachment);
   const voiceAttachments = message.attachments.filter(isVoiceAttachment);
+  const documentAttachments = message.attachments.filter(isDocumentAttachment);
   const hasImage = imageAttachments.length > 0;
   const hasVoice = voiceAttachments.length > 0;
+  const hasDocument = documentAttachments.length > 0;
 
-  if (!content.trim() && !hasImage && !hasVoice) return;
+  if (!content.trim() && !hasImage && !hasVoice && !hasDocument) return;
 
   // Strip bot mention from content for cleaner prompt
   let cleanContent = content;
@@ -487,7 +499,7 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
   }
 
   const label = message.author.username;
-  const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : ""].filter(Boolean);
+  const mediaParts = [hasImage ? "image" : "", hasVoice ? "voice" : "", hasDocument ? "document" : ""].filter(Boolean);
   const mediaSuffix = mediaParts.length > 0 ? ` [${mediaParts.join("+")}]` : "";
   console.log(
     `[${new Date().toLocaleTimeString()}] Discord ${label}${mediaSuffix}: "${cleanContent.slice(0, 60)}${cleanContent.length > 60 ? "..." : ""}"`,
@@ -527,6 +539,18 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
           });
         } catch (err) {
           console.error(`[Discord] Failed to transcribe voice for ${label}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+    }
+
+    const documentPaths: string[] = [];
+    if (hasDocument) {
+      for (const doc of documentAttachments) {
+        try {
+          const p = await downloadDiscordAttachment(doc, "document");
+          if (p) documentPaths.push(p);
+        } catch (err) {
+          console.error(`[Discord] Failed to download document for ${label}: ${err instanceof Error ? err.message : err}`);
         }
       }
     }
@@ -633,6 +657,14 @@ async function handleMessageCreate(token: string, message: DiscordMessage): Prom
       promptParts.push(
         "The user attached voice audio, but it could not be transcribed. Respond and ask them to resend a clearer clip.",
       );
+    }
+    if (documentPaths.length > 0) {
+      for (const p of documentPaths) {
+        promptParts.push(`Document path: ${p}`);
+      }
+      promptParts.push("The user attached document file(s). Read them directly before answering.");
+    } else if (hasDocument) {
+      promptParts.push("The user attached document(s), but downloading failed. Ask them to resend.");
     }
 
     const prefixedPrompt = promptParts.join("\n");
