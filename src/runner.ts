@@ -11,6 +11,7 @@ import {
 import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
+import { queryMemsearch } from "./memsearch";
 
 const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
 // Resolve prompts relative to the claudeclaw installation, not the project dir
@@ -410,6 +411,12 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
     } catch (e) {
       console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
     }
+  }
+
+  // Discord messages: proactively inject memsearch context before spawning claude -p
+  if (name === "discord") {
+    const memories = await queryMemsearch(prompt);
+    if (memories) appendParts.push(memories);
   }
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
